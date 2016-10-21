@@ -1,0 +1,12 @@
+[package]
+name = "kqueue"
+version = "0.1.0"
+authors = ["William Orr <will@worrbase.com>"]
+description = "kqueue interface for BSDs"
+license = "MIT"
+keywords = ["kqueue", "kevent", "bsd"]
+repository = "https://gitlab.com/worr/rust-kqueue"
+readme = "README.md"
+
+[dependencies]
+kqueue-sys = "^0.1.0"
