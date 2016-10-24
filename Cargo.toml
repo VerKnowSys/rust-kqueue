@@ -9,4 +9,5 @@ repository = "https://gitlab.com/worr/rust-kqueue"
 readme = "README.md"
 
 [dependencies]
-kqueue-sys = "^0.1.0"
+kqueue-sys = "^0.1.1"
+libc = "^0.2.17"
