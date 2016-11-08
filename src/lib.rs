@@ -31,7 +31,51 @@ pub struct Watcher {
     watched_fds: HashMap<RawFd, Watched>,
     watched_pids: HashMap<pid_t, Watched>,
     queue: RawFd,
+    started: bool,
 }
+
+#[derive(Debug, PartialEq)]
+pub enum Vnode {
+    Delete,
+    Write,
+    Extend,
+    Truncate,
+    Attrib,
+    Link,
+    Rename,
+    Revoke,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Proc {
+    Exit(usize),
+    Fork,
+    Exec,
+    Track(libc::pid_t),
+    Trackerr,
+}
+
+// These need to be OS specific
+#[derive(Debug, PartialEq)]
+pub enum EventData {
+    Vnode(Vnode),
+    Proc(Proc),
+    ReadReady(usize),
+    WriteReady(usize),
+    Signal(usize),
+    Timer(usize),
+}
+
+pub struct Event {
+    pub ident: u32,  // TODO: change this to include the identity that we passed to add_*
+    pub data: EventData,
+}
+
+pub struct EventIter<'a> {
+    watcher: &'a Watcher,
+}
+
+
 
 impl Watcher {
     pub fn new() -> Result<Watcher> {
@@ -45,6 +89,7 @@ impl Watcher {
                 watched_fds: HashMap::new(),
                 watched_pids: HashMap::new(),
                 queue: queue,
+                started: false,
             })
         }
     }
@@ -118,10 +163,15 @@ impl Watcher {
                    ptr::null())
         };
 
+        self.started = true;
         match ret {
             -1 => Err(Error::last_os_error()),
             _ => Ok(()),
         }
+    }
+
+    pub fn iter(&self) -> EventIter {
+        EventIter { watcher: self }
     }
 }
 
@@ -138,16 +188,132 @@ impl Drop for Watcher {
     }
 }
 
+// OS specific
+impl Event {
+    pub fn new(ev: kevent) -> Event {
+        let data = match ev.filter {
+            EventFilter::EVFILT_READ => EventData::ReadReady(ev.data as usize),
+            EventFilter::EVFILT_WRITE => EventData::WriteReady(ev.data as usize),
+            EventFilter::EVFILT_SIGNAL => EventData::Signal(ev.data as usize),
+            EventFilter::EVFILT_TIMER => EventData::Timer(ev.data as usize),
+            EventFilter::EVFILT_PROC => {
+                let inner = if ev.fflags.contains(NOTE_EXIT) {
+                    Proc::Exit(ev.data as usize)
+                } else if ev.fflags.contains(NOTE_FORK) {
+                    Proc::Fork
+                } else if ev.fflags.contains(NOTE_EXEC) {
+                    Proc::Exec
+                } else if ev.fflags.contains(NOTE_TRACK) {
+                    Proc::Track(ev.data as libc::pid_t)
+                } else {
+                    panic!("not supported")
+                };
+
+                EventData::Proc(inner)
+            }
+            EventFilter::EVFILT_VNODE => {
+                let inner = if ev.fflags.contains(NOTE_DELETE) {
+                    Vnode::Delete
+                } else if ev.fflags.contains(NOTE_WRITE) {
+                    Vnode::Write
+                } else if ev.fflags.contains(NOTE_EXTEND) {
+                    Vnode::Extend
+                } else if ev.fflags.contains(NOTE_ATTRIB) {
+                    Vnode::Attrib
+                } else if ev.fflags.contains(NOTE_LINK) {
+                    Vnode::Link
+                } else if ev.fflags.contains(NOTE_RENAME) {
+                    Vnode::Rename
+                } else if ev.fflags.contains(NOTE_REVOKE) {
+                    Vnode::Revoke
+                } else {
+                    panic!("not supported")
+                };
+
+                EventData::Vnode(inner)
+            }
+            _ => panic!("not supported"),
+        };
+
+        Event {
+            ident: ev.ident as u32,
+            data: data,
+        }
+    }
+}
+
+impl<'a> Iterator for EventIter<'a> {
+    type Item = Event;
+
+    // rather than call kevent(2) each time, we can likely optimize and
+    // call it once for like 100 items
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.watcher.started {
+            return None;
+        }
+
+        let queue = self.watcher.queue;
+        let mut kev = kevent {
+            ident: 0,
+            data: 0,
+            filter: EventFilter::EVFILT_SYSCOUNT,
+            fflags: FilterFlag::empty(),
+            flags: EventFlag::empty(),
+            udata: ptr::null_mut(),
+        };
+
+        let ret = unsafe { kevent(queue, ptr::null(), 0, &mut kev, 1, ptr::null()) };
+
+        match ret {
+            -1 => None, // other error
+            0 => None,  // timeout expired
+            _ => Some(Event::new(kev)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use super::{EventFilter, NOTE_WRITE, Watcher};
+    use std::io::Write;
+    use super::{Watcher, EventFilter, EventData, NOTE_WRITE, Vnode};
 
     #[test]
     fn test_new_watcher() {
         let mut watcher = Watcher::new().unwrap();
         let file = fs::File::create("testing.txt").unwrap();
-        watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE);
-        watcher.watch();
+
+        assert!(watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "add failed");
+        assert!(watcher.watch(), "watch failed");
+    }
+
+    #[test]
+    fn test_filename() {
+        let filename = "/tmp/testing.txt";
+        let mut watcher = match Watcher::new() {
+            Ok(wat) => wat,
+            Err(_) => panic!("new failed"),
+        };
+
+        {
+            assert!(fs::File::create(filename).is_ok(), "file creation failed");
+        };
+
+        assert!(watcher.add_filename(filename, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "add failed");
+        assert!(watcher.watch().is_ok(), "watch failed");
+
+        let mut new_file = match fs::OpenOptions::new().write(true).open(filename) {
+            Ok(fil) => fil,
+            Err(_) => panic!("open failed"),
+        };
+
+        assert!(new_file.write_all(b"foo").is_ok(), "write failed");
+        let ev = watcher.iter().next().unwrap();
+        match ev.data {
+            EventData::Vnode(Vnode::Write) => assert!(true),
+            _ => assert!(false),
+        };
     }
 }
