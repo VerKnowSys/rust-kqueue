@@ -14,29 +14,24 @@ use std::os::unix::io::RawFd;
 
 pub use kqueue_sys::constants::*;
 
-// TODO:
-// 1. Return original identity in event
-//    This means filename if a filename was passed
-// 2. Have some easy translation between filename <-> fd
-
-#[derive(Debug)]
-struct Watched {
+#[derive(Debug, PartialEq, Clone)]
+pub struct Watched {
     filter: EventFilter,
     flags: FilterFlag,
 }
 
-#[derive(Debug)]
-struct WatchedFile {
-    fd: RawFd,
-    filter: EventFilter,
-    flags: FilterFlag,
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+pub enum Ident {
+    Filename(RawFd, String),
+    Fd(RawFd),
+    Pid(pid_t),
+    Signal(i32),
+    Timer(i32),
 }
 
 #[derive(Debug)]
 pub struct Watcher {
-    watched_files: HashMap<String, WatchedFile>,
-    watched_fds: HashMap<RawFd, Watched>,
-    watched_pids: HashMap<pid_t, Watched>,
+    watched: HashMap<Ident, Watched>,
     queue: RawFd,
     started: bool,
 }
@@ -74,16 +69,15 @@ pub enum EventData {
     Error(Error),
 }
 
+#[derive(Debug)]
 pub struct Event {
-    pub ident: u32, // TODO: change this to include the identity that we passed to add_*
+    pub ident: Ident,
     pub data: EventData,
 }
 
 pub struct EventIter<'a> {
     watcher: &'a Watcher,
 }
-
-
 
 impl Watcher {
     pub fn new() -> Result<Watcher> {
@@ -93,9 +87,7 @@ impl Watcher {
             Err(Error::last_os_error())
         } else {
             Ok(Watcher {
-                watched_files: HashMap::new(),
-                watched_fds: HashMap::new(),
-                watched_pids: HashMap::new(),
+                watched: HashMap::new(),
                 queue: queue,
                 started: false,
             })
@@ -108,52 +100,42 @@ impl Watcher {
                                         flags: FilterFlag)
                                         -> Result<()> {
         let file = try!(File::open(filename.as_ref()));
-        self.watched_files.insert(filename.as_ref().to_string_lossy().into_owned(),
-                                  WatchedFile {
-                                      filter: filter,
-                                      flags: flags,
-                                      fd: file.into_raw_fd(),
-                                  });
+        self.watched.insert(Ident::Filename(file.into_raw_fd(),
+                                            filename.as_ref().to_string_lossy().into_owned()),
+                            Watched {
+                                filter: filter,
+                                flags: flags,
+                            });
+        Ok(())
+    }
+
+    pub fn add_fd(&mut self, fd: RawFd, filter: EventFilter, flags: FilterFlag) -> Result<()> {
+        self.watched.insert(Ident::Fd(fd),
+                            Watched {
+                                filter: filter,
+                                flags: flags,
+                            });
         Ok(())
     }
 
     pub fn add_file(&mut self, file: File, filter: EventFilter, flags: FilterFlag) -> Result<()> {
-        self.watched_fds.insert(file.into_raw_fd(),
-                                Watched {
-                                    filter: filter,
-                                    flags: flags,
-                                });
-        Ok(())
+        self.add_fd(file.into_raw_fd(), filter, flags)
     }
 
     pub fn watch(&mut self) -> Result<()> {
         let mut kevs: Vec<kevent> = Vec::new();
 
-        for (fd, watched) in &self.watched_fds {
-            kevs.push(kevent {
-                ident: *fd as uintptr_t,
-                filter: watched.filter,
-                flags: EV_ADD,
-                fflags: watched.flags,
-                data: 0,
-                udata: ptr::null_mut(),
-            });
-        }
+        for (ident, watched) in &self.watched {
+            let raw_ident = match *ident {
+                Ident::Fd(fd) => fd as uintptr_t,
+                Ident::Filename(fd, _) => fd as uintptr_t,
+                Ident::Pid(pid) => pid as uintptr_t,
+                Ident::Signal(sig) => sig as uintptr_t,
+                Ident::Timer(ident) => ident as uintptr_t,
+            };
 
-        for (_, watched) in &self.watched_files {
             kevs.push(kevent {
-                ident: watched.fd as uintptr_t,
-                filter: watched.filter,
-                flags: EV_ADD,
-                fflags: watched.flags,
-                data: 0,
-                udata: ptr::null_mut(),
-            });
-        }
-
-        for (pid, watched) in &self.watched_pids {
-            kevs.push(kevent {
-                ident: *pid as uintptr_t,
+                ident: raw_ident,
                 filter: watched.filter,
                 flags: EV_ADD,
                 fflags: watched.flags,
@@ -186,19 +168,44 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         unsafe { libc::close(self.queue) };
-        for (fd, _) in &self.watched_fds {
-            unsafe { libc::close(*fd) };
-        }
-
-        for (_, watched_data) in &self.watched_files {
-            unsafe { libc::close(watched_data.fd) };
+        for (ident, _) in &self.watched {
+            match *ident {
+                Ident::Fd(fd) => unsafe { libc::close(fd) },
+                Ident::Filename(fd, _) => unsafe { libc::close(fd) },
+                _ => continue,
+            };
         }
     }
 }
 
+#[inline]
+fn find_file_ident(watcher: &Watcher, fd: RawFd) -> Option<Ident> {
+    for (ident, _) in &watcher.watched {
+        match ident.clone() {
+            Ident::Fd(ident_fd) => {
+                if fd == ident_fd {
+                    return Some(Ident::Fd(fd));
+                } else {
+                    continue;
+                }
+            }
+            Ident::Filename(ident_fd, ident_str) => {
+                if fd == ident_fd {
+                    return Some(Ident::Filename(ident_fd, ident_str));
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    None
+}
+
 // OS specific
 impl Event {
-    pub fn new(ev: kevent) -> Event {
+    pub fn new(ev: kevent, watcher: &Watcher) -> Event {
         let data = match ev.filter {
             EventFilter::EVFILT_READ => EventData::ReadReady(ev.data as usize),
             EventFilter::EVFILT_WRITE => EventData::WriteReady(ev.data as usize),
@@ -243,16 +250,36 @@ impl Event {
             _ => panic!("not supported"),
         };
 
+        let ident = match ev.filter {
+            EventFilter::EVFILT_READ => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_WRITE => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_VNODE => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_SIGNAL => Ident::Signal(ev.ident as i32),
+            EventFilter::EVFILT_TIMER => Ident::Timer(ev.ident as i32),
+            EventFilter::EVFILT_PROC => Ident::Pid(ev.ident as pid_t),
+            _ => panic!("not supported"),
+        };
+
         Event {
-            ident: ev.ident as u32,
+            ident: ident,
             data: data,
         }
     }
 
-    pub fn from_error(ev: kevent) -> Event {
+    pub fn from_error(ev: kevent, watcher: &Watcher) -> Event {
+        let ident = match ev.filter {
+            EventFilter::EVFILT_READ => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_WRITE => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_VNODE => find_file_ident(watcher, ev.ident as RawFd).unwrap(),
+            EventFilter::EVFILT_SIGNAL => Ident::Signal(ev.ident as i32),
+            EventFilter::EVFILT_TIMER => Ident::Timer(ev.ident as i32),
+            EventFilter::EVFILT_PROC => Ident::Pid(ev.ident as pid_t),
+            _ => panic!("not supported"),
+        };
+
         Event {
             data: EventData::Error(io::Error::last_os_error()),
-            ident: ev.ident as u32
+            ident: ident,
         }
     }
 
@@ -260,7 +287,7 @@ impl Event {
     pub fn is_err(&self) -> bool {
         match self.data {
             EventData::Error(_) => true,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -288,9 +315,9 @@ impl<'a> Iterator for EventIter<'a> {
         let ret = unsafe { kevent(queue, ptr::null(), 0, &mut kev, 1, ptr::null()) };
 
         match ret {
-            -1 => Some(Event::from_error(kev)),
+            -1 => Some(Event::from_error(kev, self.watcher)),
             0 => None,  // timeout expired
-            _ => Some(Event::new(kev)),
+            _ => Some(Event::new(kev, self.watcher)),
         }
     }
 }
@@ -299,7 +326,7 @@ impl<'a> Iterator for EventIter<'a> {
 mod tests {
     use std::fs;
     use std::io::Write;
-    use super::{Watcher, EventFilter, EventData, NOTE_WRITE, Vnode};
+    use super::{Watcher, EventFilter, EventData, NOTE_WRITE, Vnode, Ident};
 
     #[test]
     fn test_new_watcher() {
@@ -336,6 +363,45 @@ mod tests {
         let ev = watcher.iter().next().unwrap();
         match ev.data {
             EventData::Vnode(Vnode::Write) => assert!(true),
+            _ => assert!(false),
+        };
+
+        match ev.ident {
+            Ident::Filename(_, name) => assert!(name == filename),
+            _ => assert!(false),
+        };
+    }
+
+    #[test]
+    fn test_file() {
+        let filename = "/tmp/testing.txt";
+        let mut watcher = match Watcher::new() {
+            Ok(wat) => wat,
+            Err(_) => panic!("new failed"),
+        };
+
+        let file_res = fs::File::create(filename);
+        assert!(file_res.is_ok(), "file creation failed");
+        let file = file_res.unwrap();
+
+        assert!(watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "add failed");
+        assert!(watcher.watch().is_ok(), "watch failed");
+
+        let mut new_file = match fs::OpenOptions::new().write(true).open(filename) {
+            Ok(fil) => fil,
+            Err(_) => panic!("open failed"),
+        };
+
+        assert!(new_file.write_all(b"foo").is_ok(), "write failed");
+        let ev = watcher.iter().next().unwrap();
+        match ev.data {
+            EventData::Vnode(Vnode::Write) => assert!(true),
+            _ => assert!(false),
+        };
+
+        match ev.ident {
+            Ident::Fd(_) => assert!(true),
             _ => assert!(false),
         };
     }
