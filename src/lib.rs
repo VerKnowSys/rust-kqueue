@@ -3,7 +3,6 @@ extern crate libc;
 
 use kqueue_sys::{kqueue, kevent};
 use libc::{pid_t, uintptr_t};
-use std::collections::HashMap;
 use std::convert::AsRef;
 use std::fs::File;
 use std::io::{self, Error, Result};
@@ -14,13 +13,7 @@ use std::os::unix::io::RawFd;
 
 pub use kqueue_sys::constants::*;
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Watched {
-    filter: EventFilter,
-    flags: FilterFlag,
-}
-
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Ident {
     Filename(RawFd, String),
     Fd(RawFd),
@@ -29,9 +22,16 @@ pub enum Ident {
     Timer(i32),
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct Watched {
+    filter: EventFilter,
+    flags: FilterFlag,
+    ident: Ident,
+}
+
 #[derive(Debug)]
 pub struct Watcher {
-    watched: HashMap<Ident, Watched>,
+    watched: Vec<Watched>,
     queue: RawFd,
     started: bool,
 }
@@ -87,7 +87,7 @@ impl Watcher {
             Err(Error::last_os_error())
         } else {
             Ok(Watcher {
-                watched: HashMap::new(),
+                watched: Vec::new(),
                 queue: queue,
                 started: false,
             })
@@ -100,21 +100,21 @@ impl Watcher {
                                         flags: FilterFlag)
                                         -> Result<()> {
         let file = try!(File::open(filename.as_ref()));
-        self.watched.insert(Ident::Filename(file.into_raw_fd(),
-                                            filename.as_ref().to_string_lossy().into_owned()),
-                            Watched {
-                                filter: filter,
-                                flags: flags,
-                            });
+        self.watched.push(Watched {
+            filter: filter,
+            flags: flags,
+            ident: Ident::Filename(file.into_raw_fd(),
+                                   filename.as_ref().to_string_lossy().into_owned()),
+        });
         Ok(())
     }
 
     pub fn add_fd(&mut self, fd: RawFd, filter: EventFilter, flags: FilterFlag) -> Result<()> {
-        self.watched.insert(Ident::Fd(fd),
-                            Watched {
-                                filter: filter,
-                                flags: flags,
-                            });
+        self.watched.push(Watched {
+            filter: filter,
+            flags: flags,
+            ident: Ident::Fd(fd),
+        });
         Ok(())
     }
 
@@ -125,8 +125,8 @@ impl Watcher {
     pub fn watch(&mut self) -> Result<()> {
         let mut kevs: Vec<kevent> = Vec::new();
 
-        for (ident, watched) in &self.watched {
-            let raw_ident = match *ident {
+        for watched in &self.watched {
+            let raw_ident = match watched.ident {
                 Ident::Fd(fd) => fd as uintptr_t,
                 Ident::Filename(fd, _) => fd as uintptr_t,
                 Ident::Pid(pid) => pid as uintptr_t,
@@ -168,8 +168,8 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         unsafe { libc::close(self.queue) };
-        for (ident, _) in &self.watched {
-            match *ident {
+        for watched in &self.watched {
+            match watched.ident {
                 Ident::Fd(fd) => unsafe { libc::close(fd) },
                 Ident::Filename(fd, _) => unsafe { libc::close(fd) },
                 _ => continue,
@@ -180,8 +180,8 @@ impl Drop for Watcher {
 
 #[inline]
 fn find_file_ident(watcher: &Watcher, fd: RawFd) -> Option<Ident> {
-    for (ident, _) in &watcher.watched {
-        match ident.clone() {
+    for watched in &watcher.watched {
+        match watched.ident.clone() {
             Ident::Fd(ident_fd) => {
                 if fd == ident_fd {
                     return Some(Ident::Fd(fd));
