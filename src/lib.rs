@@ -255,6 +255,14 @@ impl Event {
             ident: ev.ident as u32
         }
     }
+
+    #[inline]
+    pub fn is_err(&self) -> bool {
+        match self.data {
+            EventData::Error(_) => true,
+            _ => false
+        }
+    }
 }
 
 impl<'a> Iterator for EventIter<'a> {
