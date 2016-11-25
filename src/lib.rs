@@ -4,13 +4,20 @@ extern crate libc;
 use kqueue_sys::{kqueue, kevent};
 use libc::{pid_t, uintptr_t};
 use std::collections::HashMap;
+use std::convert::AsRef;
 use std::fs::File;
-use std::io::{Error, Result};
+use std::io::{self, Error, Result};
+use std::path::Path;
 use std::ptr;
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 
 pub use kqueue_sys::constants::*;
+
+// TODO:
+// 1. Return original identity in event
+//    This means filename if a filename was passed
+// 2. Have some easy translation between filename <-> fd
 
 #[derive(Debug)]
 struct Watched {
@@ -34,7 +41,7 @@ pub struct Watcher {
     started: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Vnode {
     Delete,
     Write,
@@ -46,7 +53,7 @@ pub enum Vnode {
     Revoke,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Proc {
     Exit(usize),
     Fork,
@@ -56,7 +63,7 @@ pub enum Proc {
 }
 
 // These need to be OS specific
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum EventData {
     Vnode(Vnode),
     Proc(Proc),
@@ -64,10 +71,11 @@ pub enum EventData {
     WriteReady(usize),
     Signal(usize),
     Timer(usize),
+    Error(Error),
 }
 
 pub struct Event {
-    pub ident: u32,  // TODO: change this to include the identity that we passed to add_*
+    pub ident: u32, // TODO: change this to include the identity that we passed to add_*
     pub data: EventData,
 }
 
@@ -94,13 +102,13 @@ impl Watcher {
         }
     }
 
-    pub fn add_filename(&mut self,
-                        filename: &str,
-                        filter: EventFilter,
-                        flags: FilterFlag)
-                        -> Result<()> {
-        let file = try!(File::open(filename));
-        self.watched_files.insert(filename.to_string(),
+    pub fn add_filename<P: AsRef<Path>>(&mut self,
+                                        filename: P,
+                                        filter: EventFilter,
+                                        flags: FilterFlag)
+                                        -> Result<()> {
+        let file = try!(File::open(filename.as_ref()));
+        self.watched_files.insert(filename.as_ref().to_string_lossy().into_owned(),
                                   WatchedFile {
                                       filter: filter,
                                       flags: flags,
@@ -240,6 +248,13 @@ impl Event {
             data: data,
         }
     }
+
+    pub fn from_error(ev: kevent) -> Event {
+        Event {
+            data: EventData::Error(io::Error::last_os_error()),
+            ident: ev.ident as u32
+        }
+    }
 }
 
 impl<'a> Iterator for EventIter<'a> {
@@ -256,7 +271,7 @@ impl<'a> Iterator for EventIter<'a> {
         let mut kev = kevent {
             ident: 0,
             data: 0,
-            filter: EventFilter::EVFILT_SYSCOUNT,
+            filter: EventFilter::EVFILTER_SYSCOUNT,
             fflags: FilterFlag::empty(),
             flags: EventFlag::empty(),
             udata: ptr::null_mut(),
@@ -265,7 +280,7 @@ impl<'a> Iterator for EventIter<'a> {
         let ret = unsafe { kevent(queue, ptr::null(), 0, &mut kev, 1, ptr::null()) };
 
         match ret {
-            -1 => None, // other error
+            -1 => Some(Event::from_error(kev)),
             0 => None,  // timeout expired
             _ => Some(Event::new(kev)),
         }
@@ -285,7 +300,7 @@ mod tests {
 
         assert!(watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
                 "add failed");
-        assert!(watcher.watch(), "watch failed");
+        assert!(watcher.watch().is_ok(), "watch failed");
     }
 
     #[test]
