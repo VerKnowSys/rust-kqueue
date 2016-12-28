@@ -8,9 +8,7 @@ use std::fs::File;
 use std::io::{self, Error, Result};
 use std::path::Path;
 use std::ptr;
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::IntoRawFd;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
 pub use kqueue_sys::constants::*;
 
@@ -131,8 +129,8 @@ impl Watcher {
         Ok(())
     }
 
-    pub fn add_file(&mut self, file: File, filter: EventFilter, flags: FilterFlag) -> Result<()> {
-        self.add_fd(file.into_raw_fd(), filter, flags)
+    pub fn add_file(&mut self, file: &File, filter: EventFilter, flags: FilterFlag) -> Result<()> {
+        self.add_fd(file.as_raw_fd(), filter, flags)
     }
 
     fn delete_kevents(&self, ident: Ident, filter: EventFilter) -> Result<()> {
@@ -408,7 +406,7 @@ mod tests {
         let mut watcher = Watcher::new().unwrap();
         let file = fs::File::create("testing.txt").unwrap();
 
-        assert!(watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+        assert!(watcher.add_file(&file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
                 "add failed");
         assert!(watcher.watch().is_ok(), "watch failed");
     }
@@ -457,18 +455,12 @@ mod tests {
 
         let file_res = fs::File::create(filename);
         assert!(file_res.is_ok(), "file creation failed");
-        let file = file_res.unwrap();
+        let mut file = file_res.unwrap();
 
-        assert!(watcher.add_file(file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+        assert!(watcher.add_file(&file, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
                 "add failed");
         assert!(watcher.watch().is_ok(), "watch failed");
-
-        let mut new_file = match fs::OpenOptions::new().write(true).open(filename) {
-            Ok(fil) => fil,
-            Err(_) => panic!("open failed"),
-        };
-
-        assert!(new_file.write_all(b"foo").is_ok(), "write failed");
+        assert!(file.write_all(b"foo").is_ok(), "write failed");
         let ev = watcher.iter().next().unwrap();
         match ev.data {
             EventData::Vnode(Vnode::Write) => assert!(true),
