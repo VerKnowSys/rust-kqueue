@@ -3,11 +3,12 @@ extern crate libc;
 
 use kqueue_sys::{kqueue, kevent};
 use libc::{pid_t, uintptr_t};
-use std::convert::AsRef;
+use std::convert::{AsRef, Into};
 use std::fs::File;
 use std::io::{self, Error, Result};
 use std::path::Path;
 use std::ptr;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 
@@ -79,6 +80,18 @@ pub struct EventIter<'a> {
     watcher: &'a Watcher,
 }
 
+impl Into<usize> for Ident {
+    fn into(self) -> usize {
+        match self {
+            Ident::Filename(fd, _) => fd as usize,
+            Ident::Fd(fd) => fd as usize,
+            Ident::Pid(pid) => pid as usize,
+            Ident::Signal(sig) => sig as usize,
+            Ident::Timer(timer) => timer as usize,
+        }
+    }
+}
+
 impl Watcher {
     pub fn new() -> Result<Watcher> {
         let queue = unsafe { kqueue() };
@@ -120,6 +133,68 @@ impl Watcher {
 
     pub fn add_file(&mut self, file: File, filter: EventFilter, flags: FilterFlag) -> Result<()> {
         self.add_fd(file.into_raw_fd(), filter, flags)
+    }
+
+    fn delete_kevents(&self, ident: Ident, filter: EventFilter) -> Result<()> {
+        let mut kev: Vec<kevent> = Vec::with_capacity(1);
+        kev.push(kevent {
+            ident: ident.into(),
+            filter: filter,
+            flags: EV_DELETE,
+            fflags: FilterFlag::empty(),
+            data: 0,
+            udata: ptr::null_mut(),
+        });
+
+        let ret = unsafe {
+            kevent(self.queue,
+                   kev.as_ptr(),
+                   kev.len() as i32,
+                   ptr::null_mut(),
+                   0,
+                   ptr::null())
+        };
+
+        match ret {
+            -1 => Err(Error::last_os_error()),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn remove_filename<P: AsRef<Path>>(&mut self, filename: P, filter: EventFilter) -> Result<()> {
+        let mut fd: RawFd = 0;
+        let new_watched = self.watched.drain(..).filter(|x| {
+            if let Ident::Filename(iterfd, ref iterfile) = x.ident {
+                if iterfile == filename.as_ref().to_str().unwrap() {
+                    fd = iterfd;
+                    false
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        }).collect();
+
+        self.watched = new_watched;
+        self.delete_kevents(Ident::Fd(fd), filter)
+    }
+
+    pub fn remove_fd(&mut self, fd: RawFd, filter: EventFilter) -> Result<()> {
+        let new_watched = self.watched.drain(..).filter(|x| {
+            if let Ident::Fd(iterfd) = x.ident {
+                iterfd != fd
+            } else {
+                true
+            }
+        }).collect();
+
+        self.watched = new_watched;
+        self.delete_kevents(Ident::Fd(fd), filter)
+    }
+
+    pub fn remove_file(&mut self, file: &File, filter: EventFilter) -> Result<()> {
+        self.remove_fd(file.as_raw_fd(), filter)
     }
 
     pub fn watch(&mut self) -> Result<()> {
@@ -404,5 +479,23 @@ mod tests {
             Ident::Fd(_) => assert!(true),
             _ => assert!(false),
         };
+    }
+
+    #[test]
+    fn test_delete_filename() {
+        let filename = "/tmp/testing.txt";
+        let mut watcher = match Watcher::new() {
+            Ok(wat) => wat,
+            Err(_) => panic!("new failed"),
+        };
+
+        {
+            assert!(fs::File::create(filename).is_ok(), "file creation failed");
+        };
+
+        assert!(watcher.add_filename(filename, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "add failed");
+        assert!(watcher.watch().is_ok(), "watch failed");
+        assert!(watcher.remove_filename(filename, EventFilter::EVFILT_VNODE).is_ok(), "delete failed");
     }
 }
