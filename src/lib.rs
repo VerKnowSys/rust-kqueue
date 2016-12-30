@@ -2,12 +2,13 @@ extern crate kqueue_sys;
 extern crate libc;
 
 use kqueue_sys::{kqueue, kevent};
-use libc::{pid_t, uintptr_t};
+use libc::{pid_t, timespec, uintptr_t};
 use std::convert::{AsRef, Into};
 use std::fs::File;
 use std::io::{self, Error, Result};
 use std::path::Path;
 use std::ptr;
+use std::time::Duration;
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
 pub use kqueue_sys::constants::*;
@@ -159,33 +160,42 @@ impl Watcher {
         }
     }
 
-    pub fn remove_filename<P: AsRef<Path>>(&mut self, filename: P, filter: EventFilter) -> Result<()> {
+    pub fn remove_filename<P: AsRef<Path>>(&mut self,
+                                           filename: P,
+                                           filter: EventFilter)
+                                           -> Result<()> {
         let mut fd: RawFd = 0;
-        let new_watched = self.watched.drain(..).filter(|x| {
-            if let Ident::Filename(iterfd, ref iterfile) = x.ident {
-                if iterfile == filename.as_ref().to_str().unwrap() {
-                    fd = iterfd;
-                    false
+        let new_watched = self.watched
+            .drain(..)
+            .filter(|x| {
+                if let Ident::Filename(iterfd, ref iterfile) = x.ident {
+                    if iterfile == filename.as_ref().to_str().unwrap() {
+                        fd = iterfd;
+                        false
+                    } else {
+                        true
+                    }
                 } else {
                     true
                 }
-            } else {
-                true
-            }
-        }).collect();
+            })
+            .collect();
 
         self.watched = new_watched;
         self.delete_kevents(Ident::Fd(fd), filter)
     }
 
     pub fn remove_fd(&mut self, fd: RawFd, filter: EventFilter) -> Result<()> {
-        let new_watched = self.watched.drain(..).filter(|x| {
-            if let Ident::Fd(iterfd) = x.ident {
-                iterfd != fd
-            } else {
-                true
-            }
-        }).collect();
+        let new_watched = self.watched
+            .drain(..)
+            .filter(|x| {
+                if let Ident::Fd(iterfd) = x.ident {
+                    iterfd != fd
+                } else {
+                    true
+                }
+            })
+            .collect();
 
         self.watched = new_watched;
         self.delete_kevents(Ident::Fd(fd), filter)
@@ -233,6 +243,15 @@ impl Watcher {
         }
     }
 
+    pub fn poll(&self, timeout: Option<Duration>) -> Option<Event> {
+        // poll will not block indefinitely
+        // None -> return immediately
+        match timeout {
+            Some(timeout) => get_event(self, Some(timeout)),
+            None => get_event(self, Some(Duration::new(0, 0))),
+        }
+    }
+
     pub fn iter(&self) -> EventIter {
         EventIter { watcher: self }
     }
@@ -274,6 +293,35 @@ fn find_file_ident(watcher: &Watcher, fd: RawFd) -> Option<Ident> {
     }
 
     None
+}
+
+#[inline]
+fn get_event(watcher: &Watcher, timeout: Option<Duration>) -> Option<Event> {
+    let mut kev = kevent {
+        ident: 0,
+        data: 0,
+        filter: EventFilter::EVFILTER_SYSCOUNT,
+        fflags: FilterFlag::empty(),
+        flags: EventFlag::empty(),
+        udata: ptr::null_mut(),
+    };
+
+    let tspec = match timeout {
+        Some(ts) => {
+            &timespec {
+                tv_sec: ts.as_secs() as i64,
+                tv_nsec: ts.subsec_nanos() as i64,
+            }
+        }
+        None => ptr::null(),
+    };
+
+    let ret = unsafe { kevent(watcher.queue, ptr::null(), 0, &mut kev, 1, tspec) };
+    match ret {
+        -1 => Some(Event::from_error(kev, watcher)),
+        0 => None,  // timeout expired
+        _ => Some(Event::new(kev, watcher)),
+    }
 }
 
 // OS specific
@@ -375,23 +423,7 @@ impl<'a> Iterator for EventIter<'a> {
             return None;
         }
 
-        let queue = self.watcher.queue;
-        let mut kev = kevent {
-            ident: 0,
-            data: 0,
-            filter: EventFilter::EVFILTER_SYSCOUNT,
-            fflags: FilterFlag::empty(),
-            flags: EventFlag::empty(),
-            udata: ptr::null_mut(),
-        };
-
-        let ret = unsafe { kevent(queue, ptr::null(), 0, &mut kev, 1, ptr::null()) };
-
-        match ret {
-            -1 => Some(Event::from_error(kev, self.watcher)),
-            0 => None,  // timeout expired
-            _ => Some(Event::new(kev, self.watcher)),
-        }
+        get_event(self.watcher, None)
     }
 }
 
@@ -488,6 +520,7 @@ mod tests {
         assert!(watcher.add_filename(filename, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
                 "add failed");
         assert!(watcher.watch().is_ok(), "watch failed");
-        assert!(watcher.remove_filename(filename, EventFilter::EVFILT_VNODE).is_ok(), "delete failed");
+        assert!(watcher.remove_filename(filename, EventFilter::EVFILT_VNODE).is_ok(),
+                "delete failed");
     }
 }
