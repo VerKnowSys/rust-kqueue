@@ -7,6 +7,7 @@ license = "MIT"
 keywords = ["kqueue", "kevent", "bsd"]
 repository = "https://gitlab.com/worr/rust-kqueue"
 readme = "README.md"
+documentation = "https://docs.worrbase.com/rust/kqueue/"
 
 [dependencies]
 kqueue-sys = "^0.1.2"
