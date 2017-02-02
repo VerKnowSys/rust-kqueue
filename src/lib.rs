@@ -13,7 +13,7 @@ use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
 pub use kqueue_sys::constants::*;
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, Clone)]
 pub enum Ident {
     Filename(RawFd, String),
     Fd(RawFd),
@@ -91,6 +91,35 @@ impl Into<usize> for Ident {
     }
 }
 
+impl PartialEq<Ident> for Ident {
+    fn eq(&self, other: &Ident) -> bool {
+        match self {
+            &Ident::Filename(_, ref name) => {
+                if let &Ident::Filename(_, ref othername) = other {
+                    name == othername
+                } else {
+                    false
+                }
+            },
+            _ => {
+                self.as_usize() == other.as_usize()
+            }
+        }
+    }
+}
+
+impl Ident {
+    fn as_usize(&self) -> usize {
+        match self {
+            &Ident::Filename(fd, _) => fd as usize,
+            &Ident::Fd(fd) => fd as usize,
+            &Ident::Pid(pid) => pid as usize,
+            &Ident::Signal(sig) => sig as usize,
+            &Ident::Timer(timer) => timer as usize,
+        }
+    }
+}
+
 impl Watcher {
     pub fn new() -> Result<Watcher> {
         let queue = unsafe { kqueue() };
@@ -112,21 +141,31 @@ impl Watcher {
                                         flags: FilterFlag)
                                         -> Result<()> {
         let file = try!(File::open(filename.as_ref()));
-        self.watched.push(Watched {
+        let watch = Watched {
             filter: filter,
             flags: flags,
             ident: Ident::Filename(file.into_raw_fd(),
                                    filename.as_ref().to_string_lossy().into_owned()),
-        });
+        };
+
+        if ! self.watched.contains(&watch) {
+            self.watched.push(watch);
+        }
+
         Ok(())
     }
 
     pub fn add_fd(&mut self, fd: RawFd, filter: EventFilter, flags: FilterFlag) -> Result<()> {
-        self.watched.push(Watched {
+        let watch = Watched {
             filter: filter,
             flags: flags,
             ident: Ident::Fd(fd),
-        });
+        };
+
+        if ! self.watched.contains(&watch) {
+            self.watched.push(watch);
+        }
+
         Ok(())
     }
 
@@ -137,7 +176,7 @@ impl Watcher {
     fn delete_kevents(&self, ident: Ident, filter: EventFilter) -> Result<()> {
         let mut kev: Vec<kevent> = Vec::with_capacity(1);
         kev.push(kevent {
-            ident: ident.into(),
+            ident: ident.as_usize(),
             filter: filter,
             flags: EV_DELETE,
             fflags: FilterFlag::empty(),
@@ -522,5 +561,25 @@ mod tests {
         assert!(watcher.watch().is_ok(), "watch failed");
         assert!(watcher.remove_filename(filename, EventFilter::EVFILT_VNODE).is_ok(),
                 "delete failed");
+    }
+
+    #[test]
+    fn test_dupe() {
+        let filename = "/tmp/testing.txt";
+        let mut watcher = match Watcher::new() {
+            Ok(wat) => wat,
+            Err(_) => panic!("new failed"),
+        };
+
+        {
+            assert!(fs::File::create(filename).is_ok(), "file creation failed");
+        };
+
+        assert!(watcher.add_filename(filename, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "add failed");
+        assert!(watcher.add_filename(filename, EventFilter::EVFILT_VNODE, NOTE_WRITE).is_ok(),
+                "second add failed");
+
+        assert!(watcher.watched.len() == 1);
     }
 }
