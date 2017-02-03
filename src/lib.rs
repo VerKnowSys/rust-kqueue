@@ -309,7 +309,6 @@ impl Drop for Watcher {
     }
 }
 
-#[inline]
 fn find_file_ident(watcher: &Watcher, fd: RawFd) -> Option<Ident> {
     for watched in &watcher.watched {
         match watched.ident.clone() {
@@ -334,7 +333,6 @@ fn find_file_ident(watcher: &Watcher, fd: RawFd) -> Option<Ident> {
     None
 }
 
-#[inline]
 fn get_event(watcher: &Watcher, timeout: Option<Duration>) -> Option<Event> {
     let mut kev = kevent {
         ident: 0,
@@ -443,7 +441,6 @@ impl Event {
         }
     }
 
-    #[inline]
     pub fn is_err(&self) -> bool {
         match self.data {
             EventData::Error(_) => true,
