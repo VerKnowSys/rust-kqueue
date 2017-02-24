@@ -55,6 +55,7 @@ pub enum Proc {
     Exec,
     Track(libc::pid_t),
     Trackerr,
+    Child(libc::pid_t),
 }
 
 // These need to be OS specific
@@ -100,10 +101,8 @@ impl PartialEq<Ident> for Ident {
                 } else {
                     false
                 }
-            },
-            _ => {
-                self.as_usize() == other.as_usize()
             }
+            _ => self.as_usize() == other.as_usize(),
         }
     }
 }
@@ -135,6 +134,24 @@ impl Watcher {
         }
     }
 
+    pub fn add_pid(&mut self,
+                   pid: libc::pid_t,
+                   filter: EventFilter,
+                   flags: FilterFlag)
+                   -> Result<()> {
+        let watch = Watched {
+            filter: filter,
+            flags: flags,
+            ident: Ident::Pid(pid),
+        };
+
+        if !self.watched.contains(&watch) {
+            self.watched.push(watch);
+        }
+
+        Ok(())
+    }
+
     pub fn add_filename<P: AsRef<Path>>(&mut self,
                                         filename: P,
                                         filter: EventFilter,
@@ -148,7 +165,7 @@ impl Watcher {
                                    filename.as_ref().to_string_lossy().into_owned()),
         };
 
-        if ! self.watched.contains(&watch) {
+        if !self.watched.contains(&watch) {
             self.watched.push(watch);
         }
 
@@ -162,7 +179,7 @@ impl Watcher {
             ident: Ident::Fd(fd),
         };
 
-        if ! self.watched.contains(&watch) {
+        if !self.watched.contains(&watch) {
             self.watched.push(watch);
         }
 
@@ -197,6 +214,22 @@ impl Watcher {
             -1 => Err(Error::last_os_error()),
             _ => Ok(()),
         }
+    }
+
+    pub fn remove_pid(&mut self, pid: libc::pid_t, filter: EventFilter) -> Result<()> {
+        let new_watched = self.watched
+            .drain(..)
+            .filter(|x| {
+                if let Ident::Pid(iterpid) = x.ident {
+                    iterpid != pid
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        self.watched = new_watched;
+        self.delete_kevents(Ident::Pid(pid), filter)
     }
 
     pub fn remove_filename<P: AsRef<Path>>(&mut self,
@@ -362,6 +395,7 @@ fn get_event(watcher: &Watcher, timeout: Option<Duration>) -> Option<Event> {
 }
 
 // OS specific
+// TODO: Events can have more than one filter flag
 impl Event {
     pub fn new(ev: kevent, watcher: &Watcher) -> Event {
         let data = match ev.filter {
@@ -378,8 +412,10 @@ impl Event {
                     Proc::Exec
                 } else if ev.fflags.contains(NOTE_TRACK) {
                     Proc::Track(ev.data as libc::pid_t)
+                } else if ev.fflags.contains(NOTE_CHILD) {
+                    Proc::Child(ev.data as libc::pid_t)
                 } else {
-                    panic!("not supported")
+                    panic!("not supported: {:?}", ev.fflags)
                 };
 
                 EventData::Proc(inner)
