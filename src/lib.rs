@@ -4,6 +4,7 @@ extern crate libc;
 use kqueue_sys::{kqueue, kevent};
 use libc::{pid_t, timespec, uintptr_t};
 use std::convert::{AsRef, Into};
+use std::default::Default;
 use std::fs::File;
 use std::io::{self, Error, Result};
 use std::path::Path;
@@ -34,6 +35,7 @@ pub struct Watcher {
     watched: Vec<Watched>,
     queue: RawFd,
     started: bool,
+    opts: KqueueOpts,
 }
 
 #[derive(Debug)]
@@ -78,6 +80,17 @@ pub struct Event {
 
 pub struct EventIter<'a> {
     watcher: &'a Watcher,
+}
+
+#[derive(Debug)]
+pub struct KqueueOpts {
+    clear: bool,
+}
+
+impl Default for KqueueOpts {
+    fn default() -> KqueueOpts {
+        KqueueOpts { clear: true }
+    }
 }
 
 impl Into<usize> for Ident {
@@ -130,8 +143,14 @@ impl Watcher {
                 watched: Vec::new(),
                 queue: queue,
                 started: false,
+                opts: Default::default(),
             })
         }
+    }
+
+    pub fn disable_clears(&mut self) -> &mut Self {
+        self.opts.clear = false;
+        self
     }
 
     pub fn add_pid(&mut self,
@@ -292,7 +311,11 @@ impl Watcher {
             kevs.push(kevent {
                 ident: raw_ident,
                 filter: watched.filter,
-                flags: EV_ADD,
+                flags: if self.opts.clear {
+                    EV_ADD | EV_CLEAR
+                } else {
+                    EV_ADD
+                },
                 fflags: watched.flags,
                 data: 0,
                 udata: ptr::null_mut(),
