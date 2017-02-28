@@ -393,7 +393,7 @@ fn get_event(watcher: &Watcher, timeout: Option<Duration>) -> Option<Event> {
     let mut kev = kevent {
         ident: 0,
         data: 0,
-        filter: EventFilter::EVFILTER_SYSCOUNT,
+        filter: EventFilter::EVFILT_SYSCOUNT,
         fflags: FilterFlag::empty(),
         flags: EventFlag::empty(),
         udata: ptr::null_mut(),

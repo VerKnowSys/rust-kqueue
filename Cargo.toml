@@ -11,5 +11,5 @@ readme = "README.md"
 documentation = "https://docs.worrbase.com/rust/kqueue/"
 
 [dependencies]
-kqueue-sys = "^0.1.2"
+kqueue-sys = "^0.1.3"
 libc = "^0.2.17"
