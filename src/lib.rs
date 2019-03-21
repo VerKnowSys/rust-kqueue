@@ -173,7 +173,7 @@ impl Watcher {
                                         filter: EventFilter,
                                         flags: FilterFlag)
                                         -> Result<()> {
-        let file = try!(File::open(filename.as_ref()));
+        let file = File::open(filename.as_ref())?;
         let watch = Watched {
             filter: filter,
             flags: flags,
