@@ -1,7 +1,7 @@
 [package]
 name = "kqueue"
-version = "0.2.1"
-authors = ["William Orr <will@worrbase.com>"]
+version = "0.2.2"
+authors = ["William Orr <will@worrbase.com>", "Daniel (dmilith) Dettlaff <dmilith@me.com>"]
 description = "kqueue interface for BSDs"
 license = "MIT"
 keywords = ["kqueue", "kevent", "bsd"]
@@ -11,5 +11,5 @@ readme = "README.md"
 documentation = "https://docs.worrbase.com/rust/kqueue/"
 
 [dependencies]
-kqueue-sys = "^0.1.3"
+kqueue-sys = "^0.1.4"
 libc = "^0.2.17"
