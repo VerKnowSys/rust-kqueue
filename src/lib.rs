@@ -1,7 +1,4 @@
-extern crate kqueue_sys;
-extern crate libc;
-
-use kqueue_sys::{kqueue, kevent};
+use kqueue2_sys::{kqueue, kevent};
 use libc::{pid_t, timespec, uintptr_t};
 use std::convert::{AsRef, Into};
 use std::default::Default;
@@ -12,7 +9,7 @@ use std::ptr;
 use std::time::Duration;
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
-pub use kqueue_sys::constants::*;
+pub use kqueue2_sys::constants::*;
 
 #[derive(Debug, Eq, Clone)]
 pub enum Ident {
